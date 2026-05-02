@@ -26,9 +26,9 @@ import tea4life.product_service.model.Product;
 import tea4life.product_service.model.ProductCategory;
 import tea4life.product_service.model.ProductOption;
 import tea4life.product_service.model.enums.AuditAction;
-import tea4life.product_service.repository.ProductCategoryRepository;
-import tea4life.product_service.repository.ProductOptionRepository;
-import tea4life.product_service.repository.ProductRepository;
+import tea4life.product_service.repository.product.ProductCategoryRepository;
+import tea4life.product_service.repository.product.ProductOptionRepository;
+import tea4life.product_service.repository.product.ProductRepository;
 import tea4life.product_service.service.ProductAdminService;
 
 import java.time.Instant;

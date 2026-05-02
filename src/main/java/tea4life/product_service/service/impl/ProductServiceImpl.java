@@ -30,7 +30,7 @@ import tea4life.product_service.model.Product;
 import tea4life.product_service.model.ProductCategory;
 import tea4life.product_service.model.ProductOption;
 import tea4life.product_service.model.ProductOptionValue;
-import tea4life.product_service.repository.ProductRepository;
+import tea4life.product_service.repository.product.ProductRepository;
 import tea4life.product_service.service.ProductService;
 
 import java.util.Comparator;

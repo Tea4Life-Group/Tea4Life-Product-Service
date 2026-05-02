@@ -1,4 +1,4 @@
-package tea4life.product_service.repository;
+package tea4life.product_service.repository.product;
 
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;

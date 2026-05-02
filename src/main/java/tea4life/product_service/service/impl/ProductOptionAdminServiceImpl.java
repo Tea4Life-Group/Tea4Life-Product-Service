@@ -7,7 +7,6 @@ import lombok.experimental.FieldDefaults;
 import lombok.experimental.NonFinal;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,8 +19,8 @@ import tea4life.product_service.dto.response.ProductOptionValueResponse;
 import tea4life.product_service.model.ProductOption;
 import tea4life.product_service.model.ProductOptionValue;
 import tea4life.product_service.model.enums.AuditAction;
-import tea4life.product_service.repository.ProductOptionRepository;
-import tea4life.product_service.repository.ProductOptionValueRepository;
+import tea4life.product_service.repository.product.ProductOptionRepository;
+import tea4life.product_service.repository.product.ProductOptionValueRepository;
 import tea4life.product_service.service.ProductOptionAdminService;
 
 import java.time.Instant;

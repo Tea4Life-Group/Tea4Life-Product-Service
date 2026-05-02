@@ -20,7 +20,7 @@ import tea4life.product_service.dto.request.FileMoveRequest;
 import tea4life.product_service.dto.response.ProductCategoryResponse;
 import tea4life.product_service.model.ProductCategory;
 import tea4life.product_service.model.enums.AuditAction;
-import tea4life.product_service.repository.ProductCategoryRepository;
+import tea4life.product_service.repository.product.ProductCategoryRepository;
 import tea4life.product_service.service.ProductCategoryAdminService;
 
 import java.time.Instant;
