@@ -1,4 +1,4 @@
-package com.yourproject.exception;
+package tea4life.product_service.advice.handler;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
