@@ -12,10 +12,10 @@ import java.util.List;
 import java.util.Optional;
 
 public interface ProductRepository extends JpaRepository<Product, Long> {
-    @EntityGraph(attributePaths = {"productCategory", "productOptions"})
+    @EntityGraph(attributePaths = {"productCategory"})
     Page<Product> findAllBy(Pageable pageable);
 
-    @EntityGraph(attributePaths = {"productCategory", "productOptions"})
+    @EntityGraph(attributePaths = {"productCategory"})
     @Query("""
             select p
             from Product p
@@ -45,6 +45,12 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     @EntityGraph(attributePaths = {"productCategory"})
     Page<Product> findByActiveTrueOrderByCreatedAtDesc(Pageable pageable);
+
+    @EntityGraph(attributePaths = {"productCategory"})
+    Page<Product> findByActiveTrueOrderByBasePriceDesc(Pageable pageable);
+
+    @EntityGraph(attributePaths = {"productCategory"})
+    Page<Product> findByActiveTrueOrderByBasePriceAsc(Pageable pageable);
 
     @Query(value = """
             select *
