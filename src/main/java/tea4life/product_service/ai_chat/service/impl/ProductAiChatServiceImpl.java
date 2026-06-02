@@ -20,10 +20,14 @@ import tea4life.product_service.client.BlogReviewClient;
 import tea4life.product_service.context.UserContext;
 import tea4life.product_service.dto.base.PageResponse;
 import tea4life.product_service.dto.request.ProductAiChatRequest;
+import tea4life.product_service.dto.response.ProductAiCartOptionSelectionResponse;
+import tea4life.product_service.dto.response.ProductAiCartSuggestionResponse;
 import tea4life.product_service.dto.response.ProductAiChatConfigResponse;
 import tea4life.product_service.dto.response.ProductAiChatHistoryItemResponse;
 import tea4life.product_service.dto.response.ProductAiChatResponse;
 import tea4life.product_service.dto.response.ProductSummaryResponse;
+import tea4life.product_service.option.model.ProductOption;
+import tea4life.product_service.option.model.ProductOptionValue;
 import tea4life.product_service.product.model.Product;
 import tea4life.product_service.ai_chat.model.ProductAiChatMessage;
 import tea4life.product_service.ai_chat.model.ProductAiChatSettings;
@@ -39,12 +43,15 @@ import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @Slf4j
@@ -73,6 +80,30 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
             "thuc don",
             "xem san pham",
             "cua hang co gi"
+    );
+    static final List<String> CART_ACTION_QUERY_HINTS = List.of(
+            "them vao gio",
+            "bo vao gio",
+            "dua vao gio",
+            "cho vao gio",
+            "them gio hang",
+            "dat mon",
+            "order",
+            "mua mon",
+            "lay mon",
+            "chon mon giup",
+            "chon giup",
+            "chot don"
+    );
+    static final List<String> NATURAL_ORDER_QUERY_HINTS = List.of(
+            "cho toi mot",
+            "cho minh mot",
+            "lay cho toi",
+            "lay cho minh",
+            "lam cho toi",
+            "lam cho minh",
+            "toi lay",
+            "minh lay"
     );
     static final List<String> HIGH_RATED_QUERY_HINTS = List.of(
             "danh gia cao", "nhieu sao", "sao cao", "rating cao", "review tot", "tot nhat"
@@ -208,6 +239,8 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
             return new ProductAiChatResponse(
                     LIMIT_REACHED_ANSWER,
                     recommendedProducts,
+                    List.of(),
+                    false,
                     settings.getChatboxDisplayName(),
                     maxPerDay,
                     0,
@@ -227,7 +260,15 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         }
 
         List<ProductSummaryResponse> recommendedProducts = buildRecommendedProducts(message, answer, candidateProducts);
+        boolean cartActionRequested = asksCartAction(message, candidateProducts);
+        List<ProductAiCartSuggestionResponse> cartSuggestions = buildCartSuggestions(
+                message,
+                candidateProducts,
+                recommendedProducts,
+                cartActionRequested
+        );
         answer = alignAnswerWithRecommendedProducts(message, answer, recommendedProducts);
+        answer = alignAnswerWithCartAction(message, answer, cartSuggestions, cartActionRequested);
         answer = sanitizeAssistantAnswer(answer);
         saveMessage(user, message, normalizeQuestion(message), answer, false);
         Integer remainingAfterAsk = maxPerDay <= 0 ? null : Math.max(0, maxPerDay - (askedToday.intValue() + 1));
@@ -235,6 +276,8 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         return new ProductAiChatResponse(
                 answer,
                 recommendedProducts,
+                cartSuggestions,
+                cartActionRequested,
                 settings.getChatboxDisplayName(),
                 maxPerDay,
                 remainingAfterAsk,
@@ -332,9 +375,6 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
             return List.of();
         }
 
-        if (lowSweetIntent) {
-            return findLowSweetCandidates(catalog, safeCatalogSize);
-        }
         if (browseCatalogIntent) {
             return catalog.stream().limit(safeCatalogSize).toList();
         }
@@ -364,10 +404,6 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         }
 
         Set<String> queryTokens = extractQueryTokens(normalizedMessage);
-        if (queryTokens.isEmpty()) {
-            return catalog.stream().limit(safeCatalogSize).toList();
-        }
-
         List<Product> rankedProducts = catalog.stream()
                 .map(product -> new ScoredProduct(product, scoreProductForMessage(product, normalizedMessage, queryTokens)))
                 .filter(scoredProduct -> scoredProduct.score() > 0)
@@ -380,11 +416,24 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
             return rankedProducts;
         }
 
+        if (lowSweetIntent) {
+            return findLowSweetCandidates(catalog, safeCatalogSize);
+        }
+
+        if (queryTokens.isEmpty()) {
+            return catalog.stream().limit(safeCatalogSize).toList();
+        }
+
         return catalog.stream().limit(safeCatalogSize).toList();
     }
 
     private List<Product> loadCatalogForAi(int safeCatalogSize) {
-        int sampleSize = Math.max(60, safeCatalogSize * 5);
+        List<Product> products = productRepository.findByActiveTrue();
+        if (!products.isEmpty()) {
+            return products;
+        }
+
+        int sampleSize = Math.max(120, safeCatalogSize * 8);
         return productRepository.findByActiveTrueOrderByCreatedAtDesc(PageRequest.of(0, sampleSize)).getContent();
     }
 
@@ -419,6 +468,7 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
 
     private int scoreProductForMessage(Product product, String normalizedMessage, Set<String> queryTokens) {
         String categoryName = product.getProductCategory() == null ? "" : product.getProductCategory().getName();
+        String normalizedProductName = normalizeForMatch(product.getName());
         String searchable = normalizeForMatch(
                 safe(product.getName()) + " " + safe(categoryName) + " " + safe(product.getDescription())
         );
@@ -428,14 +478,19 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         }
 
         int score = 0;
-        if (StringUtils.hasText(normalizedMessage) && normalizedMessage.length() >= 4 && searchable.contains(normalizedMessage)) {
-            score += 8;
+        if (StringUtils.hasText(normalizedProductName) && normalizedMessage.contains(normalizedProductName)) {
+            score += 100;
         }
 
         for (String token : queryTokens) {
             if (searchable.contains(token)) {
-                score += token.length() >= 5 ? 3 : 2;
+                boolean nameToken = normalizedProductName.contains(token);
+                score += (token.length() >= 5 ? 5 : 3) + (nameToken ? 4 : 0);
             }
+        }
+
+        if (productNameAppearsInMessage(product, normalizedMessage)) {
+            score += 30;
         }
 
         return score;
@@ -480,7 +535,8 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
                     .map(this::toSummaryResponse)
                     .toList();
         }
-        if (asksLowSweetPreference(userMessage)) {
+        if (asksLowSweetPreference(userMessage)
+                && candidateProducts.stream().noneMatch(product -> productNameAppearsInMessage(product, normalizeForMatch(userMessage)))) {
             return candidateProducts.stream()
                     .sorted(Comparator.comparingInt(this::lowSweetScore))
                     .limit(limit)
@@ -499,6 +555,382 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
                 .limit(limit)
                 .map(this::toSummaryResponse)
                 .toList();
+    }
+
+    private List<ProductAiCartSuggestionResponse> buildCartSuggestions(
+            String userMessage,
+            List<Product> candidateProducts,
+            List<ProductSummaryResponse> recommendedProducts,
+            boolean cartActionRequested
+    ) {
+        if (candidateProducts == null || candidateProducts.isEmpty()) {
+            return List.of();
+        }
+
+        List<ProductOrderMention> orderMentions = findOrderMentions(userMessage, candidateProducts);
+        int itemLimit = cartActionRequested
+                ? Math.min(4, Math.max(1, orderMentions.isEmpty()
+                ? requestedDistinctItemCount(userMessage)
+                : orderMentions.size()))
+                : Math.min(3, Math.max(1, recommendedProducts == null ? 0 : recommendedProducts.size()));
+
+        if (cartActionRequested && !orderMentions.isEmpty()) {
+            return orderMentions.stream()
+                    .limit(itemLimit)
+                    .map(mention -> toCartSuggestion(
+                            mention.product(),
+                            mention.messageScope(),
+                            requestedQuantityForProduct(userMessage, mention, 1)
+                    ))
+                    .toList();
+        }
+
+        int quantity = cartActionRequested ? requestedQuantityPerItem(userMessage) : 1;
+        List<Product> products = alignProductsForCartSuggestions(candidateProducts, recommendedProducts, itemLimit);
+
+        return products.stream()
+                .limit(itemLimit)
+                .map(product -> toCartSuggestion(product, userMessage, quantity))
+                .toList();
+    }
+
+    private List<ProductOrderMention> findOrderMentions(
+            String userMessage,
+            List<Product> candidateProducts
+    ) {
+        String normalizedMessage = normalizeForMatch(userMessage);
+        if (!StringUtils.hasText(normalizedMessage)) {
+            return List.of();
+        }
+
+        List<ProductOrderMention> mentions = candidateProducts.stream()
+                .map(product -> {
+                    int startIndex = productNameStartIndex(product, normalizedMessage);
+                    return startIndex < 0 ? null : new ProductOrderMention(product, startIndex, "");
+                })
+                .filter(mention -> mention != null)
+                .sorted(Comparator.comparingInt(ProductOrderMention::startIndex))
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        if (mentions.isEmpty()) {
+            return List.of();
+        }
+
+        List<ProductOrderMention> scopedMentions = new ArrayList<>();
+        for (int i = 0; i < mentions.size(); i++) {
+            ProductOrderMention mention = mentions.get(i);
+            int nextStartIndex = i + 1 < mentions.size()
+                    ? mentions.get(i + 1).startIndex()
+                    : normalizedMessage.length();
+            int scopeStart = findOrderScopeStart(normalizedMessage, mention.startIndex());
+            String scope = normalizedMessage.substring(scopeStart, nextStartIndex).trim();
+            scopedMentions.add(new ProductOrderMention(mention.product(), mention.startIndex(), scope));
+        }
+
+        return scopedMentions;
+    }
+
+    private int productNameStartIndex(Product product, String normalizedMessage) {
+        String normalizedName = normalizeForMatch(product.getName());
+        if (!StringUtils.hasText(normalizedName) || !StringUtils.hasText(normalizedMessage)) {
+            return -1;
+        }
+
+        int exactIndex = normalizedMessage.indexOf(normalizedName);
+        if (exactIndex >= 0) {
+            return exactIndex;
+        }
+
+        int bestIndex = -1;
+        int matchedTokens = 0;
+        boolean matchedDistinctiveToken = false;
+        for (String token : normalizedName.split("\\s+")) {
+            if (token.length() < 3 || STOP_WORDS.contains(token) || NON_PRODUCT_HINTS.contains(token)) {
+                continue;
+            }
+            int tokenIndex = normalizedMessage.indexOf(token);
+            if (tokenIndex >= 0) {
+                matchedTokens++;
+                if (isDistinctiveProductToken(token)) {
+                    matchedDistinctiveToken = true;
+                }
+                bestIndex = bestIndex < 0 ? tokenIndex : Math.min(bestIndex, tokenIndex);
+            }
+        }
+        return matchedTokens >= 2 && matchedDistinctiveToken ? bestIndex : -1;
+    }
+
+    private boolean isDistinctiveProductToken(String token) {
+        return token.length() >= 4
+                && !Set.of("hong", "tra", "sua", "luc", "xanh", "den", "mon").contains(token);
+    }
+
+    private int findOrderScopeStart(String normalizedMessage, int productStartIndex) {
+        int scopeStart = 0;
+        String[] separators = {" va them ", " va ", " them ", " cho toi ", " cho minh "};
+        for (String separator : separators) {
+            int separatorIndex = normalizedMessage.lastIndexOf(separator, productStartIndex);
+            if (separatorIndex >= 0) {
+                scopeStart = Math.max(scopeStart, separatorIndex + 1);
+            }
+        }
+        return scopeStart;
+    }
+
+    private List<Product> alignProductsForCartSuggestions(
+            List<Product> candidateProducts,
+            List<ProductSummaryResponse> recommendedProducts,
+            int limit
+    ) {
+        Map<String, Product> candidateById = candidateProducts.stream()
+                .collect(Collectors.toMap(
+                        product -> String.valueOf(product.getId()),
+                        product -> product,
+                        (first, second) -> first,
+                        LinkedHashMap::new
+                ));
+
+        List<Product> aligned = recommendedProducts == null
+                ? new ArrayList<>()
+                : recommendedProducts.stream()
+                .map(product -> candidateById.get(product.id()))
+                .filter(product -> product != null)
+                .limit(limit)
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        if (aligned.size() >= limit) {
+            return aligned;
+        }
+
+        for (Product product : candidateProducts) {
+            if (aligned.stream().noneMatch(item -> item.getId().equals(product.getId()))) {
+                aligned.add(product);
+            }
+            if (aligned.size() >= limit) {
+                break;
+            }
+        }
+
+        return aligned;
+    }
+
+    private ProductAiCartSuggestionResponse toCartSuggestion(
+            Product product,
+            String userMessage,
+            int quantity
+    ) {
+        return new ProductAiCartSuggestionResponse(
+                String.valueOf(product.getId()),
+                product.getName(),
+                product.getImageUrl(),
+                product.getBasePrice() == null ? 0D : product.getBasePrice(),
+                Math.max(1, quantity),
+                chooseOptionSelections(product, userMessage)
+        );
+    }
+
+    private List<ProductAiCartOptionSelectionResponse> chooseOptionSelections(
+            Product product,
+            String userMessage
+    ) {
+        if (product.getProductOptions() == null || product.getProductOptions().isEmpty()) {
+            return List.of();
+        }
+
+        String normalizedMessage = normalizeForMatch(userMessage);
+        List<ProductAiCartOptionSelectionResponse> selections = new ArrayList<>();
+
+        product.getProductOptions().stream()
+                .sorted(Comparator.comparing(ProductOption::getSortOrder, Comparator.nullsLast(Integer::compareTo)))
+                .forEach(option -> {
+                    List<ProductOptionValue> values = option.getProductOptionValues() == null
+                            ? List.of()
+                            : option.getProductOptionValues().stream()
+                            .sorted(Comparator.comparing(ProductOptionValue::getSortOrder, Comparator.nullsLast(Integer::compareTo)))
+                            .toList();
+                    if (values.isEmpty()) {
+                        return;
+                    }
+
+                    ProductOptionValue semanticValue = inferSemanticOptionValue(option, values, normalizedMessage);
+                    List<ProductOptionValue> matchedValues = values.stream()
+                            .filter(value -> {
+                                String normalizedValueName = normalizeForMatch(value.getValueName());
+                                return StringUtils.hasText(normalizedValueName)
+                                        && normalizedValueName.length() >= 3
+                                        && normalizedMessage.contains(normalizedValueName);
+                            })
+                            .toList();
+
+                    if (option.isMultiSelect()) {
+                        List<ProductOptionValue> selectedValues = matchedValues.isEmpty()
+                                ? (semanticValue != null
+                                ? List.of(semanticValue)
+                                : (option.isRequired() ? List.of(values.get(0)) : List.of()))
+                                : matchedValues;
+                        selectedValues.forEach(value -> selections.add(toCartOptionSelection(option, value)));
+                        return;
+                    }
+
+                    ProductOptionValue selectedValue = semanticValue != null
+                            ? semanticValue
+                            : (matchedValues.isEmpty() ? null : matchedValues.get(0));
+                    if (selectedValue == null && option.isRequired()) {
+                        selectedValue = values.get(0);
+                    }
+                    if (selectedValue != null) {
+                        selections.add(toCartOptionSelection(option, selectedValue));
+                    }
+                });
+
+        return selections;
+    }
+
+    private ProductOptionValue inferSemanticOptionValue(
+            ProductOption option,
+            List<ProductOptionValue> values,
+            String normalizedMessage
+    ) {
+        if (!StringUtils.hasText(normalizedMessage) || values == null || values.isEmpty()) {
+            return null;
+        }
+
+        String normalizedOptionName = normalizeForMatch(option.getName());
+        String normalizedValues = values.stream()
+                .map(value -> normalizeForMatch(value.getValueName()))
+                .collect(Collectors.joining(" "));
+
+        if (asksLowSweetPreference(normalizedMessage)
+                && (looksLikeSugarOption(normalizedOptionName) || looksLikeSugarOption(normalizedValues))) {
+            return pickPreferredValue(values, List.of(
+                    "it duong",
+                    "it ngot",
+                    "less sugar",
+                    "30",
+                    "25",
+                    "50",
+                    "khong duong",
+                    "khong ngot",
+                    "0"
+            ));
+        }
+
+        if (asksMediumSweetPreference(normalizedMessage)
+                && (looksLikeSugarOption(normalizedOptionName) || looksLikeSugarOption(normalizedValues))) {
+            return pickPreferredValue(values, List.of(
+                    "50",
+                    "vua",
+                    "duong vua",
+                    "ngot vua",
+                    "medium"
+            ));
+        }
+
+        if (asksLowIcePreference(normalizedMessage)
+                && (looksLikeIceOption(normalizedOptionName) || looksLikeIceOption(normalizedValues))) {
+            if (normalizedMessage.contains("khong da")) {
+                ProductOptionValue noIceValue = pickPreferredValue(values, List.of("khong da", "no ice", "0"));
+                if (noIceValue != null) {
+                    return noIceValue;
+                }
+            }
+            return pickPreferredValue(values, List.of(
+                    "it da",
+                    "less ice",
+                    "30",
+                    "50",
+                    "khong da",
+                    "0"
+            ));
+        }
+
+        if (asksHighIcePreference(normalizedMessage)
+                && (looksLikeIceOption(normalizedOptionName) || looksLikeIceOption(normalizedValues))) {
+            return pickPreferredValue(values, List.of(
+                    "nhieu da",
+                    "full da",
+                    "100",
+                    "70",
+                    "75",
+                    "more ice"
+            ));
+        }
+
+        if (asksMediumIcePreference(normalizedMessage)
+                && (looksLikeIceOption(normalizedOptionName) || looksLikeIceOption(normalizedValues))) {
+            return pickPreferredValue(values, List.of(
+                    "50",
+                    "binh thuong",
+                    "thuong",
+                    "vua",
+                    "da vua",
+                    "medium",
+                    "normal"
+            ));
+        }
+
+        if (looksLikeSizeOption(normalizedOptionName) || looksLikeSizeOption(normalizedValues)) {
+            ProductOptionValue sizeValue = inferSizeOptionValue(values, normalizedMessage);
+            if (sizeValue != null) {
+                return sizeValue;
+            }
+        }
+
+        return null;
+    }
+
+    private ProductOptionValue inferSizeOptionValue(
+            List<ProductOptionValue> values,
+            String normalizedMessage
+    ) {
+        if (normalizedMessage.contains("co l")
+                || normalizedMessage.contains("size l")
+                || normalizedMessage.contains("large")
+                || normalizedMessage.contains("lon")) {
+            return pickPreferredValue(values, List.of("l", "large", "lon"));
+        }
+        if (normalizedMessage.contains("co m")
+                || normalizedMessage.contains("size m")
+                || normalizedMessage.contains("medium")
+                || normalizedMessage.contains("vua")) {
+            return pickPreferredValue(values, List.of("m", "medium", "vua"));
+        }
+        if (normalizedMessage.contains("co s")
+                || normalizedMessage.contains("size s")
+                || normalizedMessage.contains("small")
+                || normalizedMessage.contains("nho")) {
+            return pickPreferredValue(values, List.of("s", "small", "nho"));
+        }
+        return null;
+    }
+
+    private ProductOptionValue pickPreferredValue(
+            List<ProductOptionValue> values,
+            List<String> preferredHints
+    ) {
+        for (String hint : preferredHints) {
+            String normalizedHint = normalizeForMatch(hint);
+            for (ProductOptionValue value : values) {
+                String normalizedValueName = normalizeForMatch(value.getValueName());
+                if (StringUtils.hasText(normalizedValueName) && normalizedValueName.contains(normalizedHint)) {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
+    private ProductAiCartOptionSelectionResponse toCartOptionSelection(
+            ProductOption option,
+            ProductOptionValue value
+    ) {
+        return new ProductAiCartOptionSelectionResponse(
+                String.valueOf(option.getId()),
+                option.getName(),
+                String.valueOf(value.getId()),
+                value.getValueName(),
+                value.getExtraPrice() == null ? 0D : value.getExtraPrice()
+        );
     }
 
     private String alignAnswerWithRecommendedProducts(
@@ -541,6 +973,33 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         }
 
         return currentAnswer;
+    }
+
+    private String alignAnswerWithCartAction(
+            String userMessage,
+            String currentAnswer,
+            List<ProductAiCartSuggestionResponse> cartSuggestions,
+            boolean cartActionRequested
+    ) {
+        if (!cartActionRequested) {
+            return currentAnswer;
+        }
+
+        if (cartSuggestions == null || cartSuggestions.isEmpty()) {
+            return "Mình chưa tìm được món phù hợp để thêm vào giỏ. Bạn nói rõ tên món hoặc khẩu vị hơn một chút nhé.";
+        }
+
+        String itemNames = cartSuggestions.stream()
+                .map(item -> item.quantity() + " x " + item.productName())
+                .collect(Collectors.joining(", "));
+        String suffix = "Mình đã chọn: " + itemNames + ".";
+        if (!StringUtils.hasText(currentAnswer) || FALLBACK_ANSWER.equals(currentAnswer)) {
+            return suffix;
+        }
+        if (normalizeForMatch(currentAnswer).contains(normalizeForMatch(itemNames))) {
+            return currentAnswer;
+        }
+        return currentAnswer + "\n\n" + suffix;
     }
 
     private List<Product> pickExtremePriceProducts(List<Product> products, boolean highest) {
@@ -769,7 +1228,7 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         return products.stream()
                 .map(product -> String.format(
                         Locale.ROOT,
-                        "- id: %s | ten: %s | danh_muc: %s | gia: %.0f VND | danh_gia_tb: %.2f/5 | so_luot_danh_gia: %d | mo_ta: %s | goi_y_do_ngot: %s",
+                        "- id: %s | ten: %s | danh_muc: %s | gia: %.0f VND | danh_gia_tb: %.2f/5 | so_luot_danh_gia: %d | mo_ta: %s | goi_y_do_ngot: %s | tuy_chon: %s",
                         product.getId(),
                         safe(product.getName()),
                         product.getProductCategory() == null ? "Khong ro" : safe(product.getProductCategory().getName()),
@@ -777,9 +1236,41 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
                         ratingByProductId.getOrDefault(product.getId(), ProductRatingSnapshot.empty()).averageRating(),
                         ratingByProductId.getOrDefault(product.getId(), ProductRatingSnapshot.empty()).reviewCount(),
                         safe(product.getDescription()),
-                        inferSweetnessHint(product)
+                        inferSweetnessHint(product),
+                        buildOptionContext(product)
                 ))
                 .collect(Collectors.joining("\n"));
+    }
+
+    private String buildOptionContext(Product product) {
+        if (product.getProductOptions() == null || product.getProductOptions().isEmpty()) {
+            return "Khong co tuy chon";
+        }
+
+        return product.getProductOptions().stream()
+                .sorted(Comparator.comparing(ProductOption::getSortOrder, Comparator.nullsLast(Integer::compareTo)))
+                .map(option -> {
+                    String values = option.getProductOptionValues() == null || option.getProductOptionValues().isEmpty()
+                            ? "Khong co gia tri"
+                            : option.getProductOptionValues().stream()
+                            .sorted(Comparator.comparing(ProductOptionValue::getSortOrder, Comparator.nullsLast(Integer::compareTo)))
+                            .map(value -> String.format(
+                                    Locale.ROOT,
+                                    "%s(+%.0f)",
+                                    safe(value.getValueName()),
+                                    value.getExtraPrice() == null ? 0D : value.getExtraPrice()
+                            ))
+                            .collect(Collectors.joining(", "));
+                    return String.format(
+                            Locale.ROOT,
+                            "%s[%s%s]: %s",
+                            safe(option.getName()),
+                            option.isRequired() ? "bat_buoc" : "khong_bat_buoc",
+                            option.isMultiSelect() ? ", chon_nhieu" : "",
+                            values
+                    );
+                })
+                .collect(Collectors.joining("; "));
     }
 
     private String askGemini(
@@ -801,6 +1292,7 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
                                 6) Khi goi y, hay NEU TEN SAN PHAM cu the dung y trong SAN_PHAM_LIEN_QUAN.
                                 7) Co the tham khao LICH_SU_HOI_THOAI_GAN_NHAT de giu ngu canh, nhung KHONG duoc mau thuan voi cau hoi hien tai.
                                 8) Neu cau hoi lien quan den danh gia cao/thap, uu tien dua tren danh_gia_tb va so_luot_danh_gia.
+                                9) Neu nguoi dung muon dat mon, chon mon, them vao gio hang, hay noi ro mon va tuy_chon/topping phu hop tu SAN_PHAM_LIEN_QUAN.
                                 """
                         ))
                 ),
@@ -1028,6 +1520,7 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         return Normalizer.normalize(value, Normalizer.Form.NFD)
                 .replaceAll("\\p{M}", "")
                 .toLowerCase(Locale.ROOT)
+                .replace('đ', 'd')
                 .replaceAll("[^\\p{L}\\p{Nd}]+", " ")
                 .replaceAll("\\s+", " ")
                 .trim();
@@ -1050,6 +1543,43 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
         return containsAnyPhrase(normalized, LOW_SWEET_QUERY_HINTS)
                 || (normalized.contains("khong") && normalized.contains("ngot"))
                 || (normalized.contains("it") && normalized.contains("ngot"));
+    }
+
+    private boolean asksMediumSweetPreference(String message) {
+        String normalized = normalizeForMatch(message);
+        return normalized.contains("duong vua")
+                || normalized.contains("ngot vua")
+                || normalized.contains("do ngot vua")
+                || normalized.contains("sugar 50")
+                || (normalized.contains("duong") && normalized.contains("50"))
+                || (normalized.contains("ngot") && normalized.contains("50"));
+    }
+
+    private boolean asksLowIcePreference(String message) {
+        String normalized = normalizeForMatch(message);
+        return normalized.contains("it da")
+                || normalized.contains("khong da")
+                || normalized.contains("giam da")
+                || normalized.contains("less ice")
+                || (normalized.contains("it") && normalized.contains("da"))
+                || (normalized.contains("khong") && normalized.contains("da"));
+    }
+
+    private boolean asksMediumIcePreference(String message) {
+        String normalized = normalizeForMatch(message);
+        return normalized.contains("da vua")
+                || normalized.contains("da cung vua")
+                || normalized.contains("ice 50")
+                || (normalized.contains("da") && normalized.contains("50"));
+    }
+
+    private boolean asksHighIcePreference(String message) {
+        String normalized = normalizeForMatch(message);
+        return normalized.contains("nhieu da")
+                || normalized.contains("day da")
+                || normalized.contains("full da")
+                || normalized.contains("more ice")
+                || (normalized.contains("da") && normalized.contains("100"));
     }
 
     private boolean asksHighestRated(String message) {
@@ -1104,6 +1634,158 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
                 || normalized.contains("menu")
                 || normalized.contains("thuc don")
                 || normalized.contains("cua hang"));
+    }
+
+    private boolean asksCartAction(String message, List<Product> candidateProducts) {
+        String normalized = normalizeForMatch(message);
+        if (!StringUtils.hasText(normalized)) {
+            return false;
+        }
+        boolean explicitCartAction = containsAnyPhrase(normalized, CART_ACTION_QUERY_HINTS)
+                || (normalized.contains("gio hang") && normalized.contains("them"))
+                || (normalized.contains("gio") && normalized.contains("them"))
+                || (normalized.contains("mua") && (normalized.contains("mon") || normalized.contains("ly")))
+                || (normalized.contains("dat") && (normalized.contains("mon") || normalized.contains("ly")))
+                || (normalized.contains("chon") && normalized.contains("giup"));
+        if (explicitCartAction) {
+            return true;
+        }
+
+        boolean naturalOrder = containsAnyPhrase(normalized, NATURAL_ORDER_QUERY_HINTS)
+                || Pattern.compile("\\bcho\\s+(toi|minh)\\s+\\d+\\b").matcher(normalized).find()
+                || Pattern.compile("\\bcho\\s+(toi|minh)\\s+(mot|hai|ba|bon|nam)\\b").matcher(normalized).find();
+        if (!naturalOrder || asksBrowseCatalog(message)) {
+            return false;
+        }
+
+        return candidateProducts != null
+                && candidateProducts.stream().anyMatch(product -> productNameAppearsInMessage(product, normalized));
+    }
+
+    private boolean productNameAppearsInMessage(Product product, String normalizedMessage) {
+        String normalizedName = normalizeForMatch(product.getName());
+        if (!StringUtils.hasText(normalizedName) || !StringUtils.hasText(normalizedMessage)) {
+            return false;
+        }
+        if (normalizedMessage.contains(normalizedName)) {
+            return true;
+        }
+
+        int matchedTokens = 0;
+        for (String token : normalizedName.split("\\s+")) {
+            if (token.length() < 3 || STOP_WORDS.contains(token) || NON_PRODUCT_HINTS.contains(token)) {
+                continue;
+            }
+            if (normalizedMessage.contains(token)) {
+                matchedTokens++;
+                if (matchedTokens >= 2) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean looksLikeSugarOption(String value) {
+        return value.contains("duong")
+                || value.contains("ngot")
+                || value.contains("sugar");
+    }
+
+    private boolean looksLikeIceOption(String value) {
+        return value.contains(" da")
+                || value.equals("da")
+                || value.contains("ice");
+    }
+
+    private boolean looksLikeSizeOption(String value) {
+        return value.contains("size")
+                || value.contains("kich co")
+                || value.contains("co ly")
+                || value.equals("co")
+                || value.contains(" size")
+                || value.contains(" l ")
+                || value.contains(" m ")
+                || value.contains(" s ");
+    }
+
+    private int requestedDistinctItemCount(String message) {
+        String normalized = normalizeForMatch(message);
+        int parsedNumber = firstRequestedNumber(normalized);
+        if (parsedNumber <= 1) {
+            return 1;
+        }
+        if (normalized.contains("mon khac")
+                || normalized.contains("mon khac nhau")
+                || normalized.contains("loai")
+                || normalized.contains("san pham")) {
+            return Math.min(4, parsedNumber);
+        }
+        return 1;
+    }
+
+    private int requestedQuantityPerItem(String message) {
+        String normalized = normalizeForMatch(message);
+        int parsedNumber = firstRequestedNumber(normalized);
+        if (parsedNumber <= 1) {
+            return 1;
+        }
+        if (normalized.contains("ly")
+                || normalized.contains("coc")
+                || normalized.contains("phan")
+                || normalized.contains("suat")) {
+            return Math.min(10, parsedNumber);
+        }
+        return requestedDistinctItemCount(message) > 1 ? 1 : Math.min(10, parsedNumber);
+    }
+
+    private int requestedQuantityForProduct(
+            String userMessage,
+            ProductOrderMention mention,
+            int defaultQuantity
+    ) {
+        String scope = StringUtils.hasText(mention.messageScope())
+                ? mention.messageScope()
+                : userMessage;
+        int parsedNumber = firstRequestedNumber(scope);
+        if (parsedNumber > 1) {
+            return Math.min(10, parsedNumber);
+        }
+        if (scope.contains("mot")) {
+            return 1;
+        }
+        return Math.max(1, defaultQuantity);
+    }
+
+    private int firstRequestedNumber(String normalizedMessage) {
+        if (!StringUtils.hasText(normalizedMessage)) {
+            return 1;
+        }
+
+        Matcher matcher = Pattern.compile("\\b(\\d{1,2})\\b").matcher(normalizedMessage);
+        if (matcher.find()) {
+            try {
+                return Math.max(1, Integer.parseInt(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                return 1;
+            }
+        }
+
+        Map<String, Integer> wordNumbers = Map.of(
+                "mot", 1,
+                "hai", 2,
+                "ba", 3,
+                "bon", 4,
+                "nam", 5
+        );
+        for (Map.Entry<String, Integer> entry : wordNumbers.entrySet()) {
+            if (normalizedMessage.contains(" " + entry.getKey() + " ")
+                    || normalizedMessage.startsWith(entry.getKey() + " ")
+                    || normalizedMessage.endsWith(" " + entry.getKey())) {
+                return entry.getValue();
+            }
+        }
+        return 1;
     }
 
     private boolean containsAny(String value, Set<String> hints) {
@@ -1244,6 +1926,9 @@ public class ProductAiChatServiceImpl implements ProductAiChatService {
     }
 
     private record ScoredProduct(Product product, int score) {
+    }
+
+    private record ProductOrderMention(Product product, int startIndex, String messageScope) {
     }
 
     private record ProductRatingSnapshot(double averageRating, long reviewCount) {

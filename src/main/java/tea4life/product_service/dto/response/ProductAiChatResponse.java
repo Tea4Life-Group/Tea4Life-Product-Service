@@ -5,6 +5,8 @@ import java.util.List;
 public record ProductAiChatResponse(
         String answer,
         List<ProductSummaryResponse> recommendedProducts,
+        List<ProductAiCartSuggestionResponse> cartSuggestions,
+        Boolean cartActionRequested,
         String chatboxDisplayName,
         Integer maxQuestionsPerUserPerDay,
         Integer remainingQuestionsToday,
