@@ -34,6 +34,7 @@ import tea4life.product_service.product.service.ProductAdminService;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -161,7 +162,9 @@ public class ProductAdminServiceImpl implements ProductAdminService {
 
         mapToProduct(product, request);
 
-        if (hasText(request.imageKey())) {
+        if (request.imageKey() != null && request.imageKey().isBlank()) {
+            product.setImageUrl(null);
+        } else if (hasText(request.imageKey())) {
             String destinationPath = "products/items/" + product.getId();
             ApiResponse<String> storageResponse = storageClient.confirmFile(new FileMoveRequest(request.imageKey(), destinationPath));
             if (storageResponse.getErrorCode() != null) {
@@ -171,7 +174,7 @@ public class ProductAdminServiceImpl implements ProductAdminService {
         }
 
         Product saved = productRepository.save(product);
-        if (hasText(request.imageKey()) && !Objects.equals(oldImageUrl, saved.getImageUrl())) {
+        if (request.imageKey() != null && !Objects.equals(oldImageUrl, saved.getImageUrl())) {
             publishStorageDelete(oldImageUrl);
         }
 
@@ -250,13 +253,13 @@ public class ProductAdminServiceImpl implements ProductAdminService {
 
     private List<ProductOption> resolveProductOptions(List<String> productOptionIds) {
         if (productOptionIds == null || productOptionIds.isEmpty())
-            return List.of();
+            return new ArrayList<>();
 
         List<Long> optionIds = productOptionIds.stream()
                 .map(id -> parseRequiredId(id, "productOptionId"))
-                .toList();
+                .collect(Collectors.toCollection(ArrayList::new));
 
-        List<ProductOption> options = productOptionRepository.findAllById(optionIds);
+        List<ProductOption> options = new ArrayList<>(productOptionRepository.findAllById(optionIds));
         Set<Long> foundIds = options
                 .stream()
                 .map(ProductOption::getId)
